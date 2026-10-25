@@ -26,7 +26,8 @@ import time
 import torch
 from torch import nn
 
-from model import GPT, GPTConfig, attention, apply_rotary_emb, has_ve, norm
+from .model import GPT, GPTConfig, attention, apply_rotary_emb, has_ve, norm
+from common.flops import CONVENTION, ComputeLedger, add_eval_argument, eval_interval
 
 
 @dataclass
@@ -489,6 +490,7 @@ def main():
         '--steps', type=int,
         help='Stop early for a smoke test; the training subset stays unchanged.',
     )
+    add_eval_argument(parser)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -502,6 +504,7 @@ def main():
 
     settings = recipe(args.tokens, args.population)
     defaults = DEFAULT_CONFIGS[args.tokens]
+    interval = eval_interval(args, defaults, parser)
     config = GPTConfig()
     steps = defaults['steps']
     if args.steps is not None and not 1 <= args.steps <= steps:
@@ -514,7 +517,7 @@ def main():
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
         parser.error(
-            f"Missing data: {', '.join(missing)}. Run python prepare_data.py "
+            f"Missing data: {', '.join(missing)}. Run python -m replication.prepare_data "
             f"--tokens {args.tokens} --output {args.data_dir}"
         )
     training = load_sequences(paths['train'], steps * 8)
@@ -528,6 +531,7 @@ def main():
     model = make_model(config, device, args.seed)
     optimizer = make_optimizer(model, settings)
     estimator = DUST(model, settings, args.seed, rank, world)
+    compute = ComputeLedger(device)
     if args.output.exists() and any(args.output.iterdir()):
         raise FileExistsError(f'Choose an empty output directory: {args.output}')
     if rank == 0:
@@ -553,12 +557,16 @@ def main():
         source_sha256=file_hash(Path(__file__)),
         model_sha256=file_hash(Path(__file__).parent / 'model.py'),
         torch_version=torch.__version__,
+        eval_interval=interval,
+        flop_accounting=CONVENTION,
+        flop_accounting_sha256=file_hash(Path(__file__).resolve().parents[1] / 'common/flops.py'),
     )
     if rank == 0:
         metadata['data_sha256'] = {k: file_hash(v) for k, v in paths.items()}
         (args.output / 'config.json').write_text(json.dumps(metadata, indent=2) + '\n')
 
-    best = evaluate(model, validation, device)
+    with compute.measure('val'):
+        best = evaluate(model, validation, device)
 
     def save_best():
         if rank == 0:
@@ -568,8 +576,10 @@ def main():
             )
 
     save_best()
-    history = [dict(step=0, val_loss=best)]
-    interval = defaults['eval_interval']
+    history = [dict(step=0, val_loss=best, **compute.metrics())]
+    if rank == 0:
+        (args.output / 'metrics.jsonl').write_text(json.dumps(history[0]) + '\n')
+        compute.save(args.output / 'flops.json')
     start = time.monotonic()
     if rank == 0:
         print(
@@ -579,24 +589,33 @@ def main():
 
     for step in range(1, steps + 1):
         batch = training[(step - 1) * 8:step * 8].to(device)
-        loss = estimator.step(batch[:, :-1].contiguous(), batch[:, 1:].contiguous(), optimizer)
+        x, y = batch[:, :-1].contiguous(), batch[:, 1:].contiguous()
+        with compute.measure('train', tokens=y.numel()):
+            loss = estimator.step(x, y, optimizer)
         record = dict(step=step, train_loss=loss, elapsed_seconds=time.monotonic() - start)
         if step == 1 or step % interval == 0 or step == steps:
-            value = evaluate(model, validation, device)
+            with compute.measure('val'):
+                value = evaluate(model, validation, device)
             record['val_loss'] = value
             if value < best:
                 best = value
                 save_best()
+        record.update(compute.metrics())
         history.append(record)
         if rank == 0:
             print(json.dumps(record), flush=True)
             with (args.output / 'metrics.jsonl').open('a') as stream:
                 stream.write(json.dumps(record) + '\n')
+            if 'val_loss' in record:
+                compute.save(args.output / 'flops.json')
 
     estimator.close()
     if rank == 0:
         model.load_state_dict(torch.load(args.output / 'best.pt', map_location=device, weights_only=True))
-        result = dict(best_val=best, test_at_best_val=evaluate(model, testing, device), history=history)
+        with compute.measure('test', distributed=False):
+            test_loss = evaluate(model, testing, device)
+        result = dict(best_val=best, test_at_best_val=test_loss, history=history, **compute.metrics())
+        compute.save(args.output / 'flops.json')
         (args.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         print(f"Best validation: {best:.4f}; test: {result['test_at_best_val']:.4f}", flush=True)
     if world > 1:

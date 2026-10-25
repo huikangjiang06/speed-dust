@@ -2,4 +2,4 @@ __pycache__/
 data/
 runs/
 .venv/
-tokenizer/retrained.json
+replication/tokenizer/retrained.json
