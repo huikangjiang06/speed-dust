@@ -1,0 +1,29 @@
+[
+  {
+    "site": "model.embed_tokens",
+    "direction_norm": 0.0,
+    "fit_auc": 0.5,
+    "leave_one_out_auc": 0.5,
+    "independent_auc": 0.5,
+    "independent_accuracy_at_zero": 0.5,
+    "permutation_p_one_sided": 1.0
+  },
+  {
+    "site": "model.layers.14.mlp.down_proj",
+    "direction_norm": 2.2774392857352077,
+    "fit_auc": 0.861328125,
+    "leave_one_out_auc": 0.693359375,
+    "independent_auc": 0.595703125,
+    "independent_accuracy_at_zero": 0.59375,
+    "permutation_p_one_sided": 0.09995002498750624
+  },
+  {
+    "site": "model.layers.27.mlp.down_proj",
+    "direction_norm": 15.299655937337517,
+    "fit_auc": 0.705078125,
+    "leave_one_out_auc": 0.6328125,
+    "independent_auc": 0.4111328125,
+    "independent_accuracy_at_zero": 0.421875,
+    "permutation_p_one_sided": 0.8910544727636182
+  }
+]

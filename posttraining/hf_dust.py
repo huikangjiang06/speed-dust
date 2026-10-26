@@ -21,7 +21,7 @@ from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from .allocation import resolve_allocation
 
 
-SUPPORTED_MODELS = ('llama', 'mistral', 'qwen2')
+SUPPORTED_MODELS = ('llama', 'mistral', 'qwen2', 'qwen3')
 
 
 def autocast(device, precision):
@@ -80,8 +80,8 @@ class ModelLayout:
                     raise ValueError(f'{name} must be an unquantized Linear')
                 self.modules[name] = module
                 self.families[name] = family
-            if hasattr(block.self_attn, 'q_norm') or hasattr(block.self_attn, 'k_norm'):
-                raise ValueError('Additional Q/K normalization needs its own verified local-attention adapter')
+            if model.config.model_type != 'qwen3' and (hasattr(block.self_attn, 'q_norm') or hasattr(block.self_attn, 'k_norm')):
+                raise ValueError('Unsupported additional normalization')
         self.modules['model.embed_tokens'] = self.embedding
         self.modules['lm_head'] = self.head
         self.families.update({'model.embed_tokens': 'embedding', 'lm_head': 'head'})
@@ -286,7 +286,8 @@ class HFDUST:
             for site, a in noise.items():
                 if self.direct_sampler is not None:
                     self.direct_sampler.observe_reward(site, reward, raw_reward)
-                errors[site] -= torch.einsum('nbt,nbtd->btd', reward, a) / self.sigma(site)
+                score = self.direct_sampler.score(site, a) if self.direct_sampler is not None and hasattr(self.direct_sampler, 'score') else a
+                errors[site] -= torch.einsum('nbt,nbtd->btd', reward, score) / self.sigma(site)
         return {site: error / draws for site, error in errors.items()}
 
     def reassemble(self, site, error):
@@ -309,6 +310,9 @@ class HFDUST:
             cq, sk = cos, sin
             if cos.shape[0] == self.batch:
                 cq, sk = cos.repeat(copies, 1, 1), sin.repeat(copies, 1, 1)
+            if hasattr(attn, 'q_norm'):
+                qraw = attn.q_norm(qraw.to(self.outputs[prefix + "q_proj"].dtype))
+                kraw = attn.k_norm(kraw.to(self.outputs[prefix + "k_proj"].dtype))
             qr, kr = rotary(qraw.transpose(1, 2), kraw.transpose(1, 2), cq, sk)
             return qr.to(self.dtype), kr.to(self.dtype)
 
