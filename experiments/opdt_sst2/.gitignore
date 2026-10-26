@@ -1,0 +1,12 @@
+data.json
+model.json
+*.log
+*.zip
+*.png
+*.svg
+*.html
+COMPLETE.json
+summary.json
+sentiment-audit/
+results/*/
+__pycache__/
